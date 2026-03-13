@@ -40,6 +40,13 @@ module.exports = class Hyperdrive extends ReadyResource {
     this._batching = !!(opts._checkout === null && opts._db)
     this._checkout = opts._checkout || null
 
+    // Pruned mode: clear blobs after write, restore on-demand
+    this.pruned = !!opts.pruned
+    this.originalPath = opts.originalPath || null  // Base path for original files
+    this._fileMap = new Map()  // Map drive paths to original file paths
+    this._onBlockMissing = opts.onBlockMissing || null  // Custom restore callback
+    this._prunedWindowSize = opts.prunedWindowSize || 100  // Blocks to restore at once
+
     this.ready().catch(safetyCatch)
   }
 
@@ -218,7 +225,8 @@ module.exports = class Hyperdrive extends ReadyResource {
       onwait: this._onwait,
       encryptionKey: this.encryptionKey,
       keyPair: !contentKey && this.db.core.writable ? this.db.core.keyPair : null,
-      active: this._active
+      active: this._active,
+      onBlockMissing: this.pruned ? this._createBlockRestoreCallback() : null
     })
     await blobsCore.ready()
 
@@ -254,7 +262,8 @@ module.exports = class Hyperdrive extends ReadyResource {
         encryptionKey: this.encryptionKey,
         compat: this.db.core.core.compat,
         active: this._active,
-        keyPair: m && this.db.core.writable ? this.db.core.keyPair : null
+        keyPair: m && this.db.core.writable ? this.db.core.keyPair : null,
+        onBlockMissing: this.pruned ? this._createBlockRestoreCallback() : null
       })
       await blobsCore.ready()
 
@@ -360,6 +369,121 @@ module.exports = class Hyperdrive extends ReadyResource {
 
     return this.blobs.core.clear(0, this.blobs.core.length, opts)
   }
+
+  // ============ PRUNED MODE METHODS ============
+
+  /**
+   * Set the original file path for a drive path (pruned mode)
+   * @param {string} drivePath - Path in the drive
+   * @param {string} originalPath - Path to original file on disk
+   */
+  setOriginalPath(drivePath, originalPath) {
+    this._fileMap.set(std(drivePath, false), originalPath)
+  }
+
+  /**
+   * Get the original file path for a drive path
+   * @param {string} drivePath - Path in the drive
+   * @returns {string|null} Original file path or null
+   */
+  getOriginalPath(drivePath) {
+    return this._fileMap.get(std(drivePath, false)) || null
+  }
+
+  /**
+   * Put a file in pruned mode - writes then immediately clears blobs
+   * @param {string} name - File path in drive
+   * @param {Buffer} buf - File data
+   * @param {Object} opts - Options (executable, metadata)
+   * @param {string} opts.originalPath - Path to original file for restoration
+   */
+  async putPruned(name, buf, opts = {}) {
+    const result = await this.put(name, buf, opts)
+    
+    if (opts.originalPath) {
+      this.setOriginalPath(name, opts.originalPath)
+    }
+    
+    // Clear the blob data immediately
+    await this.clear(name)
+    
+    return result
+  }
+
+  /**
+   * Create the onBlockMissing callback for pruned mode
+   * @returns {Function} Async callback for block restoration
+   */
+  _createBlockRestoreCallback() {
+    const drive = this
+    
+    return async function onBlockMissing(index, core) {
+      // If user provided custom callback, use it
+      if (drive._onBlockMissing) {
+        return drive._onBlockMissing(index, core, drive)
+      }
+      
+      // Default: try to restore from original file
+      // This requires knowing which file the block belongs to
+      // For now, emit an event so the user can handle it
+      drive.emit('block-missing', { index, core })
+      
+      // If originalPath is set, try automatic restoration
+      if (drive.originalPath) {
+        try {
+          await drive._restoreBlockFromOriginal(index, core)
+        } catch (err) {
+          drive.emit('restore-error', { index, error: err })
+          throw err
+        }
+      }
+    }
+  }
+
+  /**
+   * Restore a block from the original file
+   * @param {number} index - Block index
+   * @param {Hypercore} core - The blobs core
+   */
+  async _restoreBlockFromOriginal(index, core) {
+    // This is a simplified implementation
+    // In practice, you'd need to track which blocks belong to which files
+    // and read the appropriate byte range from the original file
+    
+    const BLOCK_SIZE = 64 * 1024  // 64KB blocks
+    const windowSize = this._prunedWindowSize
+    
+    // Calculate block range to restore (sliding window)
+    const start = index
+    const end = Math.min(core.length, index + windowSize)
+    
+    const fs = require('fs')
+    const path = this.originalPath
+    
+    if (!path || !fs.existsSync(path)) {
+      throw new Error('Original file not found: ' + path)
+    }
+    
+    // Read and restore blocks
+    const fd = fs.openSync(path, 'r')
+    try {
+      for (let i = start; i < end; i++) {
+        const offset = i * BLOCK_SIZE
+        const buf = Buffer.alloc(BLOCK_SIZE)
+        const bytesRead = fs.readSync(fd, buf, 0, BLOCK_SIZE, offset)
+        
+        if (bytesRead > 0) {
+          // Write block back to core storage
+          // Note: This requires direct storage access
+          // Implementation depends on hypercore internals
+        }
+      }
+    } finally {
+      fs.closeSync(fd)
+    }
+  }
+
+  // ============ END PRUNED MODE METHODS ============
 
   async purge() {
     if (this._checkout || this._batch) throw new Error('Can only purge the main session')

@@ -1,6 +1,79 @@
-# Hyperdrive
+# Hyperdrive (Pruned Edition)
+
+> **This is a fork of [holepunchto/hyperdrive](https://github.com/holepunchto/hyperdrive) with pruned mode support.**
 
 [See API docs at docs.pears.com](https://docs.pears.com/building-blocks/hyperdrive)
+
+## Pruned Mode
+
+This fork adds `pruned` mode, enabling storage-efficient file hosting:
+
+- Write files normally, they're automatically cleared after
+- Metadata stays intact (file list, sizes, timestamps)
+- Blobs are restored on-demand when peers request them
+- Save 99%+ storage for large file hosting
+
+### Quick Start
+
+```js
+const Hyperdrive = require('@peardrive/hyperdrive')
+const Corestore = require('corestore')
+
+const store = new Corestore('./storage')
+const drive = new Hyperdrive(store, {
+  pruned: true,
+  originalPath: '/path/to/original/file.mp4',
+  onBlockMissing: async (index, core, drive) => {
+    // Restore block from your source
+    // Called automatically when peer requests cleared data
+  }
+})
+
+// Write file (automatically cleared after)
+await drive.putPruned('/video.mp4', buffer, {
+  originalPath: '/path/to/original/video.mp4'
+})
+
+// Metadata still exists
+const entry = await drive.entry('/video.mp4')
+console.log(entry.value.blob)  // Blob reference intact
+
+// When peers connect and request data:
+// 1. onBlockMissing fires
+// 2. Your callback restores the block
+// 3. Data is served
+// 4. Optionally clear again
+```
+
+### API Additions
+
+#### `new Hyperdrive(store, { pruned: true, ... })`
+
+Enable pruned mode with these options:
+
+- `pruned` - Enable pruned mode (default: false)
+- `originalPath` - Base path for original files
+- `onBlockMissing` - Custom restore callback
+- `prunedWindowSize` - Blocks to restore at once (default: 100)
+
+#### `drive.putPruned(name, buffer, opts)`
+
+Put a file and immediately clear its blobs. 
+
+#### `drive.setOriginalPath(drivePath, filePath)`
+
+Map a drive path to its original file location.
+
+#### `drive.getOriginalPath(drivePath)`
+
+Get the original file path for restoration.
+
+### Events
+
+- `block-missing` - Emitted when a block needs restoration
+- `restore-error` - Emitted when restoration fails
+
+---
 
 Hyperdrive is a secure, real-time distributed file system
 

@@ -1,6 +1,6 @@
 {
-  "name": "hyperdrive",
-  "version": "13.3.0",
+  "name": "@peardrive/hyperdrive",
+  "version": "11.15.3-pruned.1",
   "description": "Hyperdrive is a secure, real-time distributed file system",
   "main": "index.js",
   "files": [
